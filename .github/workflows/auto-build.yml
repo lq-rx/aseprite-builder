@@ -1,9 +1,8 @@
 name: Automatic check update and Build
-# on:
-  # # 取消注释以启用自动激活
+on:
   # # Uncomment it to make this workflow automatic
-  # schedule:
-  # - cron: '0 0 * * *'
+  schedule:
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,20 +13,20 @@ jobs:
       match: ${{ steps.check-tags.outputs.match }}
       tag: ${{ steps.target-tag.outputs.tag }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     
-    - name: 获取最后的tags 
+    - name: Get last tag 
       id: target-tag
       run: |
         tag=$(curl -s https://api.github.com/repos/aseprite/aseprite/tags | jq -r '.[0].name')
         # echo "::set-output name=tag::$tag"
         echo "tag=$(echo $tag)" >> $GITHUB_OUTPUT
-    - name: 获取本仓库最后的tags
+    - name: Get the last tag of this repository
       id: current-tag
       run: |
         tag=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }} " -s https://api.github.com/repos/${{ github.repository }}/tags | jq -r '.[0].name')
         echo "tag=$(echo $tag)" >> $GITHUB_OUTPUT
-    - name: 比对tags
+    - name: Compare tags
       id: check-tags
       run: |
         if [ "${{ steps.target-tag.outputs.tag }}" == "${{ steps.current-tag.outputs.tag }}" ] ; then
@@ -37,7 +36,7 @@ jobs:
           echo "Tags do not match, running downstream job"
           echo "match=true" >> $GITHUB_OUTPUT
         fi
-    - name: 是否执行build
+    - name: Build or not?
       run: |
         echo ${{ steps.check-tags.outputs.match }}
 
@@ -58,7 +57,7 @@ jobs:
 
     steps:
 
-    - name: 获得 Release 的 Body 与仓库名称
+    - name: Get the Body and repository name of the Release
       id: get-content
       shell: bash
       run: |
@@ -79,31 +78,69 @@ jobs:
     - uses: seanmiddleditch/gha-setup-ninja@master
     - uses: ilammy/msvc-dev-cmd@v1
 
-    - name: 获取 skia 并且生成 Makefile
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Windows" ]] ; then
-          export enable_ccache=off
-        else
-          export enable_ccache=on
-        fi
-        curl -L -o skia.zip https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-Windows-Release-x64.zip
-        7z x skia.zip -oskia
-        cmake -S . -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DENABLE_UI=${{ matrix.enable_ui }} \
-          -DENABLE_CCACHE=$enable_ccache \
-          -DLAF_BACKEND=skia \
-          -DSKIA_DIR=./skia \
-          -DSKIA_LIBRARY_DIR=./skia/out/Release-x64 \
-          -DSKIA_LIBRARY=./skia/out/Release-x64/skia.lib
+    - name: List directory contents
+      run: Get-ChildItem -Force | Select-Object Mode, LastWriteTime, Length, Name
 
-    - name: 编译
+    - name: Check CMake
+      run: |
+        cmake --version
+        which cmake
+
+    # "Skia-m124 (don't use)" is required for icudtl.dat and more
+    - name: Set up Skia directory
+      run: |
+        curl -L -o skia.zip https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip
+        7z x skia.zip -oskia
+    
+    - name: Verify icudtl.dat file
+      run: |
+        $SKIA_DIR = "${PWD}/skia"
+        $SKIA_ICUDATA_FILE = "${SKIA_DIR}/third_party/externals/icu/flutter/icudtl.dat"
+        
+        if (Test-Path $SKIA_ICUDATA_FILE) {
+          Write-Output "icudtl.dat file found in Skia directory"
+        } else {
+          Write-Error "icudtl.dat file not found in Skia directory"
+          exit 1
+        }
+    
+        # Optionally, copy to build directory if needed
+        # $BUILD_DIR = "${PWD}/build"
+        # New-Item -ItemType Directory -Force -Path $BUILD_DIR
+        # Copy-Item -Path $SKIA_ICUDATA_FILE -Destination "${BUILD_DIR}/icudtl.dat" -Force
+    
+    - name: Set environment variables
+      run: |
+        if ("${{ runner.os }}" -eq "Windows") {
+          echo "enable_ccache=off" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        } else {
+          echo "enable_ccache=on" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        }
+        echo "enable_ui=on" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    
+    - name: Generate Makefile
+      shell: pwsh
+      run: |
+        $cmakeArgs = @(
+          "-S", ".",
+          "-B", "build",
+          "-G", "Ninja",
+          "-DCMAKE_BUILD_TYPE=${{ matrix.build_type }}",
+          "-DENABLE_UI=${{ env.enable_ui }}",
+          "-DENABLE_CCACHE=${{ env.enable_ccache }}",
+          "-DLAF_BACKEND=skia",
+          "-DSKIA_DIR=${PWD}/skia",
+          "-DSKIA_LIBRARY_DIR=${PWD}/skia/out/Release-x64",
+          "-DSKIA_LIBRARY=${PWD}/skia/out/Release-x64/skia.lib"
+        )
+        & cmake $cmakeArgs
+      
+    - name: compiling
       shell: bash
       run: |
         cd build && ninja
     
-    - name: 获取 "libcrypto-1_1-x64.dll"
+    - name: Fetch "libcrypto-1_1-x64.dll"
       shell: bash 
       run: |
         GITHUB_REPOSITORY="${{ github.repository }}"
@@ -111,8 +148,8 @@ jobs:
 
         curl -L -o D:/a/$REPO_NAME/$REPO_NAME/build/bin/libcrypto-1_1-x64.dll https://github.com/feenkcom/libopenssl/releases/download/v0.5.0/crypto-x86_64-pc-windows-msvc.dll
 
-    # # 为了遵守 Aseprite 的 EULA, 请确保仓库为私有再启用该功能
-    # - name: 上传文件到 artifact
+    # #  In order to comply with Aseprite's EULA, please make sure the repository is private before enabling this feature!
+    # - name: Uploading build artifacts
     #   uses: actions/upload-artifact@v3
     #   with:
     #     name: aseprite 
@@ -123,7 +160,7 @@ jobs:
     #       D:/a/$REPO_NAME/$REPO_NAME/build/bin/aseprite.exe
     #       D:/a/$REPO_NAME/$REPO_NAME/build/bin/libcrypto-1_1-x64.dll
 
-    - name: 打包
+    - name: zip build artifacts
       shell: bash
       run: |
         GITHUB_REPOSITORY="${{ github.repository }}"
@@ -133,14 +170,14 @@ jobs:
         7z a -tzip aseprite.${{ needs.check.outputs.tag }}.zip data aseprite.exe libcrypto-1_1-x64.dll
         cp aseprite.${{ needs.check.outputs.tag }}.zip D:/a/
 
-    - name: 草拟 Release 并且上传文件
+    - name: Draft Release and upload files
       uses: softprops/action-gh-release@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         tag_name: ${{ needs.check.outputs.tag }}
         name: Aseprite ${{ needs.check.outputs.tag }}
         body: ${{ steps.get-content.outputs.body-content }}
-        draft: true # 为了遵守 Aseprite 的 EULA, 取消 draft 前请确保仓库为私有
+        draft: true # To comply with Aseprite's EULA, make sure the repository is private before canceling the draft.
         prerelease: false
         files: |
           D:/a/aseprite.${{ needs.check.outputs.tag }}.zip
